@@ -1,0 +1,922 @@
+---
+title: "Thesis BLM & ALM - LDA"
+output: html_notebook
+---
+
+# Preparation 
+
+First, I loaded the libraries that I used for Twitter API, data manipulation, text cleaning and analysis: 
+
+```{r}
+#rm(list = ls()) # Clear the environment
+#getwd() # Double check the working directory 
+#save.image(file = "myEnvironment.RData") # Save environment periodically
+#vignette("academictwitteR-tidy") # Information about how to make Twitter data tidy / useful for social science research
+#options(stringsAsFactors = F)
+#options(scipen = 999)
+#options(max.print=1000)
+memory.limit(size=56000)
+#devtools::install_github("gadenbuie/tweetrmd")
+#devtools::install_github('rstudio/webshot2')
+#devtools::install_github("hadley/emo")
+#devtools::install_github("ricardo-bion/ggtech", dependencies=TRUE)
+#remotes::install_github("kasperwelbers/corpus-tools")
+
+library(academictwitteR)
+library(plyr)
+library(dplyr)
+library(knitr)
+library(tibble)
+library(stringr)
+library(tm)
+library(sentimentr)
+library(tidytext)
+library(forestmangr)
+library(ggplot2)
+library(rtweet)
+library(tweetrmd)
+library(emo)
+library(tidyr)
+library(wordcloud)
+library(textstem)
+library(Matrix)
+library(ggdendro)
+library(network)
+library(GGally)
+library(sna)
+library(FactoMineR)
+library(factoextra)
+library(topicmodels)
+library(furrr)
+library(purrr)
+library(stm)
+library(ggthemes)
+library(scales)
+library(ggthemr)
+library(rlang)
+library(textclean)
+library(qdap)
+library(corpustools)
+ggthemr('light')
+```
+
+I am not sharing my bearer token. Please replace for "XYZ"
+
+```{r}
+bearer_token <- "XYZ"
+```
+
+I built the query. I want tweets that include the #BlackLivesMatter and #AllLivesMatter hashtags, excluding retweets, promoted tweets and tweets with cashtags. 
+
+```{r}
+query1 <- build_query(query = "#BlackLivesMatter", is_retweet = FALSE, remove_promoted = TRUE, has_cashtags = FALSE)
+
+query2 <- build_query(query = "#AllLivesMatter", is_retweet = FALSE, remove_promoted = TRUE, has_cashtags = FALSE)
+```
+
+And to get the tweets: For both queries, I want 300,000 tweets that were posted in 2021  (English language). I will store these as JSON files. 
+
+```{r}
+tweets1 <-get_all_tweets(query1,
+                         start_tweets = "2021-01-01T00:00:00Z",
+                         end_tweets = "2022-01-01T00:00:00Z",
+                         n = 300000, 
+                         bearer_token = bearer_token, 
+                         lang = "en",
+                         data_path = "blacklivesmatter",
+                         bind_tweets = FALSE
+                        )
+
+
+tweets2 <-get_all_tweets(query2,
+                         start_tweets = "2021-01-01T00:00:00Z",
+                         end_tweets = "2022-01-01T00:00:00Z",
+                         n = 300000, 
+                         bearer_token = bearer_token, 
+                         lang = "en",
+                         data_path = "alllivesmatter", 
+                         bind_tweets = FALSE
+                        )
+```
+
+The tweets and users from both queries are then combined into one dataset. I store these in "tidy" format, which essentially contains all columns necessary for social media research. It has the following features: 
+1. Data about tweets and their authors
+2. This data excludes lists of hashtags, cashtags, urls, entities, context, annotations etc. 
+
+```{r}
+BLM_twitter <- bind_tweets(data_path = "blacklivesmatter", output_format = "tidy") #300,020 tweets
+
+ALM_twitter <- bind_tweets(data_path = "alllivesmatter", output_format = "tidy")#57,879 tweets
+```
+
+
+# Preliminary data exploration
+
+I removed noise in the data. Let's start with BLM.
+
+```{r}
+# Remove tweets that are not English
+BLM_data_fix <- BLM_twitter[BLM_twitter$lang == "en",] 
+
+
+# Remove duplicates
+BLM_data_fix <- BLM_data_fix %>% 
+  distinct(text, .keep_all = T) 
+
+
+# Extra step: Remove duplicates of the first 100 characters (this removes spam)
+BLM_data_fix$text_first_60 <- substr(BLM_data_fix$text,1,60)  
+
+BLM_data_fix <- BLM_data_fix %>% 
+  distinct(text_first_60, .keep_all = T) 
+
+
+# Exclude Tweets from users who have the word "bot" or "TwitterBot" in their profile bio
+BLM_data_fix <- BLM_data_fix %>% 
+  filter(!str_detect(user_description, "bot"))
+
+BLM_data_fix <- BLM_data_fix %>% 
+  filter(!str_detect(user_description, "TwitterBot")) 
+
+BLM_data_fix <- BLM_data_fix %>% 
+  filter(!str_detect(source, "Bot")) 
+
+BLM_data_fix <- BLM_data_fix %>% 
+  filter(!str_detect(source, "bot")) 
+
+
+# Exclude Tweets from users who are following less than 10 users 
+BLM_data_fix <- subset(BLM_data_fix, !user_following_count<10) 
+
+# Exclude tweets from spammers
+BLM_data_fix <- BLM_data_fix %>% 
+  filter(!str_detect(user_username, "OldMainBell")) 
+
+BLM_data_fix <- BLM_data_fix %>% 
+  filter(!str_detect(user_username, "RealityBitestv1")) 
+
+
+#############################################################
+
+# Number of users and tweets
+length(unique(BLM_data_fix$user_username))
+length(BLM_data_fix$text)
+
+#76,767 users
+#202,858 tweets
+
+```
+
+```{r}
+# Remove tweets that are not English
+ALM_data_fix <- ALM_twitter[ALM_twitter$lang == "en",] 
+
+
+# Remove duplicates
+ALM_data_fix <- ALM_data_fix %>% 
+  distinct(text, .keep_all = T) 
+
+
+# Extra step: Remove duplicates of the first 100 characters (this removes spam)
+ALM_data_fix$text_first_60 <- substr(ALM_data_fix$text,1,60)  
+
+ALM_data_fix <- ALM_data_fix %>% 
+  distinct(text_first_60, .keep_all = T) 
+
+
+# Exclude Tweets from users who have the word "bot" or "TwitterBot" in their profile bio
+ALM_data_fix <- ALM_data_fix %>% 
+  filter(!str_detect(user_description, "bot"))
+
+ALM_data_fix <- ALM_data_fix %>% 
+  filter(!str_detect(user_description, "TwitterBot")) 
+
+ALM_data_fix <- ALM_data_fix %>% 
+  filter(!str_detect(source, "Bot")) 
+
+ALM_data_fix <- ALM_data_fix %>% 
+  filter(!str_detect(source, "bot")) 
+
+
+# Exclude Tweets from users who are following less than 10 users 
+ALM_data_fix <- subset(ALM_data_fix, !user_following_count<10) 
+
+# Exclude tweets from spammers
+ALM_data_fix <- ALM_data_fix %>% 
+  filter(!str_detect(user_username, "RacialReduce")) 
+
+
+#############################################################
+
+# Number of users and tweets
+length(unique(ALM_data_fix$user_username))
+length(ALM_data_fix$text)
+
+#27,953 users
+#50,497 tweets
+
+```
+
+Now, we can create some visuals: 
+
+I will create a visual that shows which devices are used to tweet. 
+```{r}
+BLM_app <- BLM_twitter %>% 
+  select(source) %>% 
+  group_by(source) %>%
+  dplyr::summarize(count=n())
+BLM_app <- subset(BLM_app, count > 30)
+
+
+ALM_app <- ALM_twitter %>% 
+  select(source) %>% 
+  group_by(source) %>%
+  dplyr::summarize(count=n())
+ALM_app <- subset(ALM_app, count > 30)
+
+```
+
+```{r}
+data_BLM_app <- data.frame(
+  category=BLM_app$source,
+  count=BLM_app$count
+)
+data_BLM_app$fraction = data_BLM_app$count / sum(data_BLM_app$count)
+data_BLM_app$percentage = data_BLM_app$count / sum(data_BLM_app$count) * 100
+data_BLM_app$ymax = cumsum(data_BLM_app$fraction)
+data_BLM_app$ymin = c(0, head(data_BLM_app$ymax, n=-1))
+data_BLM_app <- round_df(data_BLM_app, 2)
+Source_BLM <- paste(data_BLM_app$category, data_BLM_app$percentage, "%")
+ggplot(data_BLM_app, aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3, fill=Source_BLM)) +
+  geom_rect() +
+  coord_polar(theta="y") + # Try to remove that to understand how the chart is built initially
+  xlim(c(2, 4)) +
+  theme_void() +
+  theme(legend.position = "right")
+
+
+data_ALM_app <- data.frame(
+  category=ALM_app$source,
+  count=ALM_app$count
+)
+data_ALM_app$fraction = data_ALM_app$count / sum(data_ALM_app$count)
+data_ALM_app$percentage = data_ALM_app$count / sum(data_ALM_app$count) * 100
+data_ALM_app$ymax = cumsum(data_ALM_app$fraction)
+data_ALM_app$ymin = c(0, head(data_ALM_app$ymax, n=-1))
+data_ALM_app <- round_df(data_ALM_app, 2)
+Source_ALM <- paste(data_ALM_app$category, data_ALM_app$percentage, "%")
+ggplot(data_ALM_app, aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3, fill=Source_ALM)) +
+  geom_rect() +
+  coord_polar(theta="y") + # Try to remove that to understand how the chart is built initially
+  xlim(c(2, 4)) +
+  theme_void() +
+  theme(legend.position = "right")
+```
+
+Next, I will create a visual which shows the frequency of tweets by weeks. 
+
+```{r}
+ts_plot(BLM_data_fix, by = "weeks") +
+  labs(x = NULL, y = NULL,
+       title = "Tweets mentioning #BlackLivesMatter by week",
+       subtitle = "1 January 2021 until 31 December 2021") + scale_colour_ggthemr_d() + geom_point() 
+
+#Note to self. BLM plot does not work. Figure out why. 
+
+ts_plot(ALM_data_fix, by = "weeks") +
+  labs(x = NULL, y = NULL,
+       title = "Tweets mentioning #AllLivesMatter by week",
+       subtitle = "1 January 2021 until 31 December 2021") + scale_colour_ggthemr_d() + geom_point()
+```
+
+Now, we will look at the five most retweeted tweets for BLM and ALM:
+
+```{r}
+BLM_twitter %>% 
+  arrange(-retweet_count) %>%
+  top_n(5, retweet_count) %>% 
+  select(created_at, user_username, text, retweet_count, conversation_id)
+
+ALM_twitter %>% 
+  arrange(-retweet_count) %>%
+  top_n(5, retweet_count) %>% 
+  select(created_at, user_username, text, retweet_count, conversation_id)
+```
+
+We will do the same thing for the most liked tweets: 
+```{r}
+BLM_data_fix %>% 
+  arrange(-like_count) %>%
+  top_n(5, like_count) %>% 
+  select(created_at, user_username, text, retweet_count, conversation_id)
+
+ALM_twitter %>% 
+  arrange(-like_count) %>%
+  top_n(5, like_count) %>% 
+  select(created_at, user_username, text, retweet_count, conversation_id)
+```
+
+
+We can also identify the top tweeters: 
+
+```{r}
+BLM_data_fix %>% 
+  dplyr::count(user_username, sort = TRUE) %>%
+  top_n(10) %>%
+  mutate(user_username = paste0("@", user_username))
+
+ALM_data_fix %>% 
+  dplyr::count(user_username, sort = TRUE) %>%
+  top_n(10) %>%
+  mutate(user_username = paste0("@", user_username))
+```
+
+These are the top emojis used. They're in code form, but we can easily look up the associated emoji on Google. 
+
+```{r}
+BLM_data_fix %>%
+  mutate(emoji = ji_extract_all(text)) %>%
+  unnest(cols = c(emoji)) %>%
+  dplyr::count(emoji, sort = TRUE) %>%
+  top_n(15)
+
+
+ALM_data_fix %>%
+  mutate(emoji = ji_extract_all(text)) %>%
+  unnest(cols = c(emoji)) %>%
+  dplyr::count(emoji, sort = TRUE) %>%
+  top_n(15)
+```
+
+The top hashtags used can be found below. 
+
+```{r}
+BLM_data_fix %>% 
+  unnest_tokens(hashtag, text, "tweets", to_lower = FALSE) %>%
+  filter(str_detect(hashtag, "^#")) %>%
+  dplyr::count(hashtag, sort = TRUE) %>%
+  top_n(20)
+
+ALM_data_fix %>% 
+  unnest_tokens(hashtag, text, "tweets", to_lower = FALSE) %>%
+  filter(str_detect(hashtag, "^#")) %>%
+  dplyr::count(hashtag, sort = TRUE) %>%
+  top_n(20)
+```
+
+We can also identify the top mentions in the tweets. 
+
+```{r}
+BLM_data_fix %>% 
+  unnest_tokens(mentions, text, "tweets", to_lower = FALSE) %>%
+  filter(str_detect(mentions, "^@")) %>%  
+  dplyr::count(mentions, sort = TRUE) %>%
+  top_n(15)
+
+ALM_data_fix %>% 
+  unnest_tokens(mentions, text, "tweets", to_lower = FALSE) %>%
+  filter(str_detect(mentions, "^@")) %>%  
+  dplyr::count(mentions, sort = TRUE) %>%
+  top_n(15)
+```
+
+As for our first simple text analytics task, we will identify the most used words by creating a word cloud. 
+
+```{r}
+BLM_words <- BLM_twitter %>%
+  mutate(text = str_remove_all(text, "&amp;|&lt;|&gt;"),
+         text = str_remove_all(text, "\\s?(f|ht)(tp)(s?)(://)([^\\.]*)[\\.|/](\\S*)"),
+         text = str_remove_all(text, "[^\x01-\x7F]")) %>% 
+  unnest_tokens(word, text, token = "tweets") %>%
+  filter(!word %in% stop_words$word,
+        !word %in% str_remove_all(stop_words$word, "'"),
+        str_detect(word, "[a-z]"),
+        !str_detect(word, "^#"),         
+        !str_detect(word, "@\\S+")) %>%
+  dplyr::count(word, sort = TRUE)
+
+
+ALM_words <- ALM_twitter %>%
+  mutate(text = str_remove_all(text, "&amp;|&lt;|&gt;"),
+         text = str_remove_all(text, "\\s?(f|ht)(tp)(s?)(://)([^\\.]*)[\\.|/](\\S*)"),
+         text = str_remove_all(text, "[^\x01-\x7F]")) %>% 
+  unnest_tokens(word, text, token = "tweets") %>%
+  filter(!word %in% stop_words$word,
+        !word %in% str_remove_all(stop_words$word, "'"),
+        str_detect(word, "[a-z]"),
+        !str_detect(word, "^#"),         
+        !str_detect(word, "@\\S+")) %>%
+  dplyr::count(word, sort = TRUE)
+
+BLM_word_cloud <- BLM_words %>% 
+  with(wordcloud(word, n, random.order = FALSE, max.words = 150, colors = "#171C54"))
+
+ALM_word_cloud <- ALM_words %>% 
+  with(wordcloud(word, n, random.order = FALSE, max.words = 150, colors = "#171C54"))
+```
+
+
+# Data preprocessing 
+
+First, load the stopwords: 
+
+```{r}
+myStopwords <- c(stopwords("english"))
+```
+
+I created a function for removing most punctuations (except @ and #):
+
+```{r}
+removeMostPunctuation <- function(text, keep = c("#", "@")) {
+    m <- sub_holder(keep, text)
+    m$unhold(strip(m$output))
+    }
+```
+
+We will now perform data cleaning, for this we use the tm library. Let's start with BLM:
+
+```{r}
+# Replace emojis for strings
+hash2 <- lexicon::hash_emojis
+hash2$y <- gsub("[[:space:]]|[[:punct:]]", "", hash2$y)
+BLM_tweets_no_emojis <- replace_emoji(BLM_data_fix$text, emoji_dt = hash2)
+BLM_tweets_no_emojis <- replace_non_ascii(BLM_tweets_no_emojis)
+
+# Review for proper results
+BLM_data_fix$text[40:50]
+BLM_tweets_no_emojis[40:50]
+
+# Replace the column
+BLM_data_fix$text <- BLM_tweets_no_emojis
+
+
+#####################
+
+# Build a corpus and specify the source to be the characters of vectors 
+# a corpus is a collection of written texts 
+BLM_myCorpus <- Corpus(VectorSource(BLM_data_fix$text))
+BLM_myCorpus <- tm_map(BLM_myCorpus, function(x) iconv(enc2utf8(x), sub = "byte"))
+
+# Convert the corpus into lowercase
+BLM_myCorpus <- tm_map(BLM_myCorpus,content_transformer(tolower))
+
+# Remove numbers
+BLM_myCorpus <- tm_map(BLM_myCorpus, removeNumbers)
+
+# Remove punctuation
+BLM_myCorpus <- tm_map(BLM_myCorpus, removeMostPunctuation)
+ 
+# Use gsub functions to remove some more
+Textprocessing <- function(x) {
+  gsub("http[[:alnum:]]*",'', x)
+  gsub('http\\S+\\s*', '', x) ## Remove URLs
+  gsub('[[:cntrl:]]', '', x) ## Remove Controls and special characters
+  gsub("\\d", '', x) ## Remove Controls and special characters
+  gsub('[[:punct:]]', '', x) ## Remove Punctuations
+  gsub("^[[:space:]]*","",x) ## Remove leading whitespaces
+  gsub("[[:space:]]*$","",x) ## Remove trailing whitespaces
+  gsub(' +',' ',x) ## Remove extra whitespaces
+  }
+
+BLM_myCorpus <- tm_map(BLM_myCorpus,Textprocessing)
+
+
+# Remove stopwords 
+BLM_myCorpus <- tm_map(BLM_myCorpus,removeWords,myStopwords)
+
+# Copy of corpus
+BLM_myCorpus_copy <- BLM_myCorpus
+
+# Remove words
+BLM_myCorpus <- tm_map(BLM_myCorpus,removeWords,c("amp", "blacklivesmatter"))
+
+# Remove extra whitespaces
+BLM_myCorpus <- tm_map(BLM_myCorpus, stripWhitespace)
+
+
+```
+```{r}
+# Before text preprocessing 
+BLM_data_fix$text[30000:30015]
+
+# After text preprocessing
+for (i in 30000:30015) {
+    cat(paste("[[", i, "]] ", sep = ""))
+    #writeLines(myCorpus[[i]])
+    writeLines(as.character(BLM_myCorpus[[i]]))
+}
+```
+
+And we do the same for ALM:
+
+```{r}
+# Replace emojis for strings
+hash2 <- lexicon::hash_emojis
+hash2$y <- gsub("[[:space:]]|[[:punct:]]", "", hash2$y)
+ALM_tweets_no_emojis <- replace_emoji(ALM_data_fix$text, emoji_dt = hash2)
+ALM_tweets_no_emojis <- replace_non_ascii(ALM_tweets_no_emojis)
+
+# Review for proper results
+ALM_data_fix$text[40:50]
+ALM_tweets_no_emojis[40:50]
+
+# Replace the column
+ALM_data_fix$text <- ALM_tweets_no_emojis
+
+
+#####################
+
+# Build a corpus and specify the source to be the characters of vectors 
+# a corpus is a collection of written texts 
+ALM_myCorpus <- Corpus(VectorSource(ALM_data_fix$text))
+ALM_myCorpus <- tm_map(ALM_myCorpus, function(x) iconv(enc2utf8(x), sub = "byte"))
+
+# Convert the corpus into lowercase
+ALM_myCorpus <- tm_map(ALM_myCorpus, content_transformer(tolower))
+
+# Remove numbers
+ALM_myCorpus <- tm_map(ALM_myCorpus, removeNumbers)
+
+# Remove punctuation
+ALM_myCorpus <- tm_map(ALM_myCorpus, removeMostPunctuation)
+
+
+# Use gsub functions to remove some more
+Textprocessing <- function(x) {
+  gsub("http[[:alnum:]]*",'', x)
+  gsub('http\\S+\\s*', '', x) ## Remove URLs
+  gsub('[[:cntrl:]]', '', x) ## Remove Controls and special characters
+  gsub("\\d", '', x) ## Remove Controls and special characters
+  gsub('[[:punct:]]', '', x) ## Remove Punctuations
+  gsub("^[[:space:]]*","",x) ## Remove leading whitespaces
+  gsub("[[:space:]]*$","",x) ## Remove trailing whitespaces
+  gsub(' +',' ',x) ## Remove extra whitespaces
+  }
+
+ALM_myCorpus <- tm_map(ALM_myCorpus,Textprocessing)
+
+
+# Remove stopwords 
+ALM_myCorpus <- tm_map(ALM_myCorpus,removeWords,myStopwords)
+
+# Remove words
+ALM_myCorpus <- tm_map(ALM_myCorpus,removeWords,c("amp","alllivesmatter"))
+
+
+# Remove extra whitespaces
+ALM_myCorpus <- tm_map(ALM_myCorpus, stripWhitespace)
+
+
+```
+
+```{r}
+# Before text preprocessing
+ALM_data_fix$text[1:10]
+
+# After text preprocessing
+for (i in 1:10) {
+    cat(paste("[[", i, "]] ", sep = ""))
+    #writeLines(myCorpus[[i]])
+    writeLines(as.character(ALM_myCorpus[[i]]))
+}
+```
+
+
+## Document-term matrix and collocation matrix 
+
+First, we create a document-term matrix. We will simplify the document-term matrix to accommodate computing constraints. I reduced the DMT by creating two constraints: (1) words must be between 3 and 36 characters, (2) Words must at least appear in 50 tweets. Next, we convert this into a sparse matrix and count the co-occurrences. 
+
+```{r}
+# Create document-term matrix
+BLM_dtm <- DocumentTermMatrix(BLM_myCorpus,
+                             control = list(
+                             wordLengths = c(3, 36),
+                             bounds = list(global = c(50, Inf)),
+                             weighting = weightTf
+                           ))
+
+
+# Convert dtm into a sparse matrix 
+blmdtm <- Matrix::sparseMatrix(i = BLM_dtm$i, j = BLM_dtm$j, 
+                           x = BLM_dtm$v, 
+                           dims = c(BLM_dtm$nrow, BLM_dtm$ncol),
+                           dimnames = dimnames(BLM_dtm))
+
+# Calculate co-occurrence counts
+BLM_coocurrences <- t(blmdtm) %*% blmdtm
+
+# Convert into matrix
+BLM_collocates <- as.matrix(BLM_coocurrences)
+
+# Inspect the size of the matrix 
+ncol(BLM_collocates) 
+
+```
+
+```{r}
+# Create document-term matrix
+ALM_dtm <- DocumentTermMatrix(ALM_myCorpus,
+                             control = list(
+                             wordLengths = c(3, 36),
+                             bounds = list(global = c(50, Inf)),
+                             weighting = weightTf
+                           ))
+
+# Convert dtm into a sparse matrix 
+almdtm <- Matrix::sparseMatrix(i = ALM_dtm$i, j = ALM_dtm$j, 
+                           x = ALM_dtm$v, 
+                           dims = c(ALM_dtm$nrow, ALM_dtm$ncol),
+                           dimnames = dimnames(ALM_dtm))
+
+# Calculate co-occurrence counts
+ALM_coocurrences <- t(almdtm) %*% almdtm
+
+# Convert into matrix
+ALM_collocates <- as.matrix(ALM_coocurrences)
+
+# Inspect the size of the matrix 
+ncol(ALM_collocates) 
+
+```
+
+Now, we will compute the top words in the corpora: 
+
+```{r}
+corpora_compare <- corpora.compare(blmdtm, almdtm, smooth = 1, min.over = NULL, min.chi = NULL, select.rows = NULL)
+
+
+corpora_compare[,c("term","termfreq.x","relfreq.x")] %>% arrange(desc(termfreq.x)) %>% top_n(60)%>% select(term, relfreq.x) %>% mutate(relfreq.x, relfreq.x*100) %>% mutate(across(where(is.numeric), ~ round(., digits = 2)))
+
+
+corpora_compare[,c("term","termfreq.y","relfreq.y")] %>% arrange(desc(termfreq.y)) %>% top_n(60) %>% select(term, relfreq.y) %>% mutate(relfreq.y, relfreq.y*100)%>% mutate(across(where(is.numeric), ~ round(., digits = 2)))
+```
+
+
+# Latent Dirichlet Allocation (LDA)
+
+We have the document-term matrices, _blmdtm_ and _almdtm_. We can select the number of topics K by running the following code. Use the `furrr` package for parallel processing. 
+
+## Tuning the number of topics k 
+
+We do not know ahead of time how many topics we should use, and there is no "right" answer for the number of appropriate topics in a given corpus. Let's try K = {5, 10, 15, 20, ..., 80} topics: 
+
+```{r}
+plan(multisession)
+
+BLM_model2 <- data_frame(K = c(5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80)) %>%
+  mutate(topic_model = future_map(K, ~ stm(blmdtm,
+                                           init.type = "LDA",
+                                           K = .,
+                                           verbose = FALSE,
+                                           seed = TRUE)))
+```
+
+```{r}
+BLM_heldout <- make.heldout(blmdtm)
+
+BLM_k_result2 <- BLM_model2 %>%
+  mutate(exclusivity = map(topic_model, exclusivity),
+         semantic_coherence = map(topic_model, semanticCoherence, blmdtm))
+
+BLM_k_result2
+```
+
+```{r}
+BLM_k_result2 %>%
+  transmute(K,
+            `Semantic coherence` = map_dbl(semantic_coherence, mean)) %>%
+  gather(Metric, Value, -K) %>%
+  ggplot(aes(K, Value, color = Metric)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  labs(x = "K (number of topics)",
+       y = NULL,
+       title = "Model diagnostics by number of topics - BLM",
+       subtitle = "These diagnostics indicate that a good number of topics would be around X") + scale_colour_ggthemr_d()
+```
+
+Now, let's do ALM:
+
+```{r}
+plan(multisession)
+
+ALM_model2 <- data_frame(K = c(5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80)) %>%
+  mutate(topic_model = future_map(K, ~ stm(almdtm,
+                                           init.type = "LDA",
+                                           K = .,
+                                           verbose = FALSE,
+                                           seed = TRUE)))
+```
+
+```{r}
+ALM_heldout <- make.heldout(almdtm)
+
+ALM_k_result2 <- ALM_model2 %>%
+  mutate(exclusivity = map(topic_model, exclusivity),
+         semantic_coherence = map(topic_model, semanticCoherence, almdtm))
+
+ALM_k_result2
+```
+
+```{r}
+ALM_k_result2 %>%
+  transmute(K,
+            `Semantic coherence` = map_dbl(semantic_coherence, mean)) %>%
+  gather(Metric, Value, -K) %>%
+  ggplot(aes(K, Value, color = Metric)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  labs(x = "K (number of topics)",
+       y = NULL,
+       title = "Model diagnostics by number of topics - ALM",
+       subtitle = "These diagnostics indicate that a good number of topics would be less than 10") + scale_colour_ggthemr_d()
+```
+
+We can also plot the results from both together in one single line graph: 
+
+```{r}
+# Collect semantic coherence in one dataframe 
+ALM_sem_coh2 <- ALM_k_result2 %>% transmute(K,`Semantic coherence` = map_dbl(semantic_coherence, mean)) %>% gather(Metric, Value, -K)
+BLM_sem_coh2 <- BLM_k_result2 %>% transmute(K,`Semantic coherence` = map_dbl(semantic_coherence, mean)) %>% gather(Metric, Value, -K)
+semantic_coherence2 <- merge(x=ALM_sem_coh2, y=BLM_sem_coh2, by = "K")
+semantic_coherence2$BlackLivesMatter <- semantic_coherence2$Value.y
+semantic_coherence2$AllLivesMatter <- semantic_coherence2$Value.x
+
+# Draw a plot
+semantic_coherence2 <- semantic_coherence2 %>% select(K, BlackLivesMatter, AllLivesMatter) %>% gather(key = "variable", value = "value", - K)
+
+semantic_coherence2 %>% ggplot(aes(K, value, color = variable)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  labs(x = "K (number of topics)",
+       y = NULL) + scale_colour_ggthemr_d() 
+```
+
+We will compare this to the suggestion by Robert et al. (2014) to compare the semantic coherence with the exclusivity:
+
+```{r}
+# Black Lives Matter
+BLM_k_result2 %>%
+  select(K, exclusivity, semantic_coherence) %>%
+  filter(K %in% c(5,15,25,35)) %>%
+  unnest() %>%
+  mutate(K = as.factor(K)) %>%
+  ggplot(aes(semantic_coherence, exclusivity, color = K)) +
+  geom_point(size = 2, alpha = 0.7) +
+  labs(x = "Semantic coherence",
+       y = "Exclusivity",
+       title = "Black Lives Matter") + scale_colour_ggthemr_d()
+
+# All Lives Matter
+ALM_k_result2 %>%
+  select(K, exclusivity, semantic_coherence) %>%
+  filter(K %in% c(5,15,25,35)) %>%
+  unnest() %>%
+  mutate(K = as.factor(K)) %>%
+  ggplot(aes(semantic_coherence, exclusivity, color = K)) +
+  geom_point(size = 2, alpha = 0.7) +
+  labs(x = "Semantic coherence",
+       y = "Exclusivity",
+       title = "All Lives Matter")+ scale_colour_ggthemr_d()
+```
+
+Now, we choose our number of topics _k_: 
+
+```{r}
+BLM_topic_model <- BLM_k_result2 %>% 
+  filter(K == 35) %>% 
+  pull(topic_model) %>% 
+  .[[1]]
+
+summary(BLM_topic_model)
+```
+
+```{r}
+ALM_topic_model <- ALM_k_result2 %>% 
+  filter(K == 35) %>% 
+  pull(topic_model) %>% 
+  .[[1]]
+
+summary(ALM_topic_model)
+```
+
+
+## Exploring the topic models 
+
+To explore more deeply, we can `tidy()` the topic model results to get a dataframe that we can compute on. There are two possible outputs for this topic model, the "beta" matrix of topic-word probabilities, and the "gamma" matrix of document-topic probabilities. Let's start with the first: 
+
+```{r}
+BLM_td_beta <- tidy(BLM_topic_model)
+BLM_td_gamma <- tidy(BLM_topic_model, matrix = "gamma",
+                 document_names = rownames(blmdtm))
+
+BLM_top_terms <-BLM_td_beta %>%
+  arrange(beta) %>%
+  group_by(topic) %>%
+  top_n(20, beta) %>%
+  arrange(-beta) %>%
+  select(topic, term) %>%
+  summarise(terms = list(term)) %>%
+  mutate(terms = map(terms, paste, collapse = ", ")) %>% 
+  unnest(cols = c(terms))
+
+
+BLM_gamma_terms <-  BLM_td_gamma %>%
+  group_by(topic) %>%
+  summarise(gamma = mean(gamma)) %>%
+  arrange(desc(gamma)) %>%
+  left_join(BLM_top_terms, by = "topic") %>%
+  mutate(topic = paste0("Topic ", topic),
+         topic = reorder(topic, gamma))
+```
+
+And now ALM:
+
+```{r}
+ALM_td_beta <- tidy(ALM_topic_model)
+ALM_td_gamma <- tidy(ALM_topic_model, matrix = "gamma",
+                 document_names = rownames(almdtm))
+
+ALM_top_terms <-ALM_td_beta %>%
+  arrange(beta) %>%
+  group_by(topic) %>%
+  top_n(20, beta) %>%
+  arrange(-beta) %>%
+  select(topic, term) %>%
+  summarise(terms = list(term)) %>%
+  mutate(terms = map(terms, paste, collapse = ", ")) %>% 
+  unnest(cols = c(terms))
+
+
+ALM_gamma_terms <-  ALM_td_gamma %>%
+  group_by(topic) %>%
+  summarise(gamma = mean(gamma)) %>%
+  arrange(desc(gamma)) %>%
+  left_join(ALM_top_terms, by = "topic") %>%
+  mutate(topic = paste0("Topic ", topic),
+         topic = reorder(topic, gamma))
+```
+
+We also examined documents that are highly associated with topics using the `findThoughts` function. 
+
+```{r}
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 100, topics = 5) ### England football team
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 100, topics = 7) ### George Floyd
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 100, topics = 17) ### Intersectionality
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 100, topics = 9) #spam/uninterpretable
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 100, topics = 12) ### BLM Matters
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 100, topics = 4) ### Juneteenth
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 100, topics = 34) #spam/uninterpretable
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 100, topics = 8) #spam/uninterpretable
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 100, topics = 19) ### Transnational affairs
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 100, topics = 33) #spam/uninterpretable
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 100, topics = 11) ### Vigilantilism and police
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 100, topics = 25) ### Racism
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 100, topics = 30) #spam/uninterpretable
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 100, topics = 3) #spam/uninterpretable
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 100, topics = 32) ### US politics
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 500, topics = 35) ### Justice system
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 500, topics = 27) ### Media
+findThoughts(BLM_topic_model, texts = BLM_data_fix$text, n = 500, topics = 2) ### Protests
+
+```
+
+```{r}
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 25) ### White supremacy
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 12) ### Criticism on BLM
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 29) ### Support for ALM
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 7) ### Israeli-Palestinian conflict
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 34) #spam/uninterpretable
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 17) ### US politics
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 18) ### Killings
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 35) ### Left-right political spectrum
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 2) #spam/uninterpretable
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 9) ### #BlackLivesMatter
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 24) ### Police
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 3) ### Racism
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 6) #spam/uninterpretable
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 28) ### Asian Lives Matter
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 15) #spam/uninterpretable
+findThoughts(ALM_topic_model, texts = ALM_data_fix$text, n = 500, topics = 21) ### NotAllMen
+```
+
+# Network analysis
+
+In the network analysis, we will use a subset of the documents in the corpus. I randomly choose 5,000 tweets to import to InfraNodus. 
+
+```{r}
+# Black Lives Matter
+BLM_tweets_no_emojis <- as.data.frame(BLM_tweets_no_emojis)
+BLM_df_infranodus <- as.data.frame(BLM_tweets_no_emojis[sample(nrow(BLM_tweets_no_emojis), 5000), ])
+names(BLM_df_infranodus)[1] <- "tweets"
+BLM_df_infranodus <- gsub("@[[:alpha:]]*","", BLM_df_infranodus$tweets)
+BLM_df_infranodus <- as.data.frame(BLM_df_infranodus)
+write.csv(BLM_df_infranodus, "BLM_df_infranodus.csv")
+
+# All Lives Matter
+ALM_tweets_no_emojis <- as.data.frame(ALM_tweets_no_emojis)
+ALM_df_infranodus <- as.data.frame(ALM_tweets_no_emojis[sample(nrow(ALM_tweets_no_emojis), 5000), ])
+names
+names(ALM_df_infranodus)[1] <- "tweets"
+ALM_df_infranodus <- gsub("@[[:alpha:]]*","", ALM_df_infranodus$tweets)
+ALM_df_infranodus <- as.data.frame(ALM_df_infranodus)
+write.csv(ALM_df_infranodus, "ALM_df_infrandodus.csv")
+```
+
